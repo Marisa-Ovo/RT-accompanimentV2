@@ -14,15 +14,23 @@ dependencies = [
 ]
 
 # ---------------------------------------------------------------------------
-# PyTorch CUDA source
-# cu121 构建可运行于 CUDA 12.1 / 12.4 / 12.7 / 13.x 驱动
-# 如果你的机器只有 CUDA 11.8，请将下方 index url 改为:
+# PyTorch 来源：Linux 训练机用 cu121，Windows 本地开发用 PyPI CPU 版
+# 训练机 CUDA 版本覆盖：12.1 / 12.4 / 12.7 / 13.x   均可用 cu121
+# 如果训练机只有 CUDA 11.8，请将 pytorch-cuda 的 url 改为:
 #   https://download.pytorch.org/whl/cu118
 # ---------------------------------------------------------------------------
 [tool.uv.sources]
-torch = { index = "pytorch-cuda" }
+torch = [
+  { index = "pytorch-cuda", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cuda", marker = "sys_platform == 'win32'" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cuda"
 url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
