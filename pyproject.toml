@@ -1,0 +1,28 @@
+[project]
+name = "rt-accompaniment"
+version = "0.1.0"
+description = "Real-time piano accompaniment generation based on LLaMA"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3.0",
+    "numpy>=1.26",
+    "transformers>=4.40.0",
+    "accelerate>=0.30.0",
+    "safetensors>=0.4.0",
+    "tqdm>=4.66.0",
+    "pretty_midi>=0.2.10",
+]
+
+# ---------------------------------------------------------------------------
+# PyTorch CUDA source
+# cu121 构建可运行于 CUDA 12.1 / 12.4 / 12.7 / 13.x 驱动
+# 如果你的机器只有 CUDA 11.8，请将下方 index url 改为:
+#   https://download.pytorch.org/whl/cu118
+# ---------------------------------------------------------------------------
+[tool.uv.sources]
+torch = { index = "pytorch-cuda" }
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
