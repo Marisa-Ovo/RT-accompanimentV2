@@ -1,125 +1,105 @@
+"""
+MidiConverter — Token/Pianoroll → MIDI 转换器
+
+职责单一：解码 + 写 MIDI，不涉及模型或数据集。
+"""
+
+import os
 import numpy as np
-import torch
 import pretty_midi
 from my_tokenizer import PianoMusicTokenizer
 
 
-def pianoroll_to_midi_notes(pianoroll, tempo, velocity, track_name="Piano"):
-    """
-    将pianoroll转换为MIDI notes列表
+class MidiConverter:
+    """Token beats / pianoroll → MIDI 文件。构造时注入 tokenizer。"""
 
-    Args:
-        pianoroll: (2, 88, t) 的pianoroll数组 [sustain, onset]
-        tempo: BPM速度
-        velocity: MIDI音符力度
-        track_name: track名称
+    def __init__(self, tokenizer: PianoMusicTokenizer):
+        self.tokenizer = tokenizer
+        self.vocab = tokenizer.vocab
 
-    Returns:
-        instrument: pretty_midi.Instrument对象
-    """
-    sustain_roll = pianoroll[0]
-    onset_roll = pianoroll[1]
+    def beats_to_midi(self, mel_beats, acc_beats, tempo=120,
+                      save_path="temp.mid", velocity=64):
+        """
+        将 mel/acc beat tokens 解码并保存为双轨 MIDI。
 
-    instrument = pretty_midi.Instrument(program=0, name=track_name)
-    seconds_per_16th = 60.0 / tempo / 4
+        Args:
+            mel_beats: List[List[int]] — melody beat tokens
+            acc_beats: List[List[int]] — accompaniment beat tokens
+            tempo: BPM
+            save_path: 输出路径
+            velocity: MIDI velocity
+        """
+        mel_pr = self.tokenizer.decode_beats_to_pianoroll(
+            mel_beats, track_marker_id=self.vocab.track_marker_mel)
+        acc_pr = self.tokenizer.decode_beats_to_pianoroll(
+            acc_beats, track_marker_id=self.vocab.track_marker_acc)
 
-    note_count = 0
-    for pitch_idx in range(88):
-        pitch = pitch_idx + 21
+        # 对齐长度
+        target_len = max(mel_pr.shape[2], acc_pr.shape[2])
+        mel_pr = self._pad_time(mel_pr, target_len)
+        acc_pr = self._pad_time(acc_pr, target_len)
 
-        onset_positions = np.where(onset_roll[pitch_idx] > 0)[0]
+        midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
+        midi.instruments.append(
+            self._pianoroll_to_instrument(mel_pr, tempo, velocity, "Melody"))
+        midi.instruments.append(
+            self._pianoroll_to_instrument(acc_pr, tempo, velocity, "Accompaniment"))
 
-        for onset_pos in onset_positions:
-            end_pos = onset_pos + 1
-            while end_pos < sustain_roll.shape[1] and sustain_roll[pitch_idx, end_pos] > 0:
-                end_pos += 1
+        self._ensure_dir(save_path)
+        midi.write(save_path)
 
-            start_time = onset_pos * seconds_per_16th
-            end_time = end_pos * seconds_per_16th
+        total = sum(len(inst.notes) for inst in midi.instruments)
+        print(f"MIDI saved: {save_path} | {tempo} BPM | {total} notes | {midi.get_end_time():.1f}s")
 
-            note = pretty_midi.Note(
-                velocity=velocity,
-                pitch=pitch,
-                start=start_time,
-                end=end_time
-            )
-            instrument.notes.append(note)
-            note_count += 1
+    def gt_to_midi(self, npz_path, save_path, velocity=80):
+        """从 GT npz 文件直接生成双轨 MIDI。"""
+        data = np.load(npz_path, allow_pickle=True)
+        meta = data['metadata'].item()
+        tempo = meta.get('bpm', 120) or 120
 
-    print(f"  {track_name}: {note_count} 个音符")
-    return instrument
+        measures = [data[f'measure_{i}'] for i in range(meta['num_measures'])]
+        full_pr = np.concatenate(measures, axis=2)  # (4, 88, t)
 
+        midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
+        midi.instruments.append(
+            self._pianoroll_to_instrument(full_pr[:2], tempo, velocity, "Melody"))
+        midi.instruments.append(
+            self._pianoroll_to_instrument(full_pr[2:], tempo, velocity, "Accompaniment"))
 
-def tokens_to_midi(result_dict, save_path="temp.mid", velocity=64, tempo=120):
-    """
-    将生成结果转换为MIDI文件（mel 和 acc 分别保存为两个 track）
+        self._ensure_dir(save_path)
+        midi.write(save_path)
+        print(f"GT MIDI saved: {save_path} | {tempo} BPM | {meta['num_measures']} measures")
 
-    Args:
-        result_dict: generate_accompaniment返回的字典
-        save_path: MIDI文件保存路径
-        velocity: MIDI音符力度
-        tempo: BPM速度
-    """
-    print("="*50)
-    print("开始处理tokens到MIDI（双track模式）...")
+    # ---- internal ----
 
-    mel_beats = result_dict['mel_beats']
-    acc_beats = result_dict['acc_beats']
-    metadata = result_dict.get('metadata', {})
+    @staticmethod
+    def _pad_time(arr, target_len):
+        if arr.shape[2] < target_len:
+            return np.pad(arr, ((0, 0), (0, 0), (0, target_len - arr.shape[2])))
+        return arr
 
-    if tempo is None or tempo == 120:
-        tempo = metadata.get('bpm', 120)
-    if tempo is None:
-        tempo = 120
-    print(f"Melody beats数量: {len(mel_beats)}")
-    print(f"Accompaniment beats数量: {len(acc_beats)}")
-    print(f"BPM: {tempo}")
+    @staticmethod
+    def _pianoroll_to_instrument(pianoroll, tempo, velocity, name="Piano"):
+        """(2, 88, t) pianoroll → pretty_midi.Instrument"""
+        sustain, onset = pianoroll[0], pianoroll[1]
+        inst = pretty_midi.Instrument(program=0, name=name)
+        sec_per_16th = 60.0 / tempo / 4
 
-    # 使用默认 tokenizer 解码
-    tokenizer = PianoMusicTokenizer()
-    v = tokenizer.vocab
+        for pitch_idx in range(88):
+            for onset_pos in np.where(onset[pitch_idx] > 0)[0]:
+                end_pos = onset_pos + 1
+                while end_pos < sustain.shape[1] and sustain[pitch_idx, end_pos] > 0:
+                    end_pos += 1
+                inst.notes.append(pretty_midi.Note(
+                    velocity=velocity,
+                    pitch=pitch_idx + 21,
+                    start=onset_pos * sec_per_16th,
+                    end=end_pos * sec_per_16th,
+                ))
+        return inst
 
-    mel_pianoroll = tokenizer.decode_beats_to_pianoroll(mel_beats, track_marker_id=v.track_marker_mel)
-    acc_pianoroll = tokenizer.decode_beats_to_pianoroll(acc_beats, track_marker_id=v.track_marker_acc)
-
-    # 对齐长度
-    mel_len = mel_pianoroll.shape[2]
-    acc_len = acc_pianoroll.shape[2]
-    target_length = max(mel_len, acc_len)
-
-    print(f"Melody 长度: {mel_len}, Accompaniment 长度: {acc_len}, 目标长度: {target_length}")
-
-    if mel_len < target_length:
-        pad_len = target_length - mel_len
-        print(f"Melody较短，填充 {pad_len} 个时间步")
-        mel_pianoroll = np.pad(mel_pianoroll,
-                                 ((0, 0), (0, 0), (0, pad_len)), constant_values=0)
-
-    if acc_len < target_length:
-        pad_len = target_length - acc_len
-        print(f"Accompaniment较短，填充 {pad_len} 个时间步")
-        acc_pianoroll = np.pad(acc_pianoroll,
-                                 ((0, 0), (0, 0), (0, pad_len)), constant_values=0)
-
-    # 创建MIDI
-    midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
-
-    print("创建Track:")
-    mel_instrument = pianoroll_to_midi_notes(
-        mel_pianoroll, tempo=tempo, velocity=velocity, track_name="Melody")
-    midi.instruments.append(mel_instrument)
-
-    acc_instrument = pianoroll_to_midi_notes(
-        acc_pianoroll, tempo=tempo, velocity=velocity, track_name="Accompaniment")
-    midi.instruments.append(acc_instrument)
-
-    midi.write(save_path)
-
-    total_notes = len(mel_instrument.notes) + len(acc_instrument.notes)
-    print("="*50)
-    print(f"✓ MIDI文件已保存到: {save_path}")
-    print(f"✓ 总时长: {midi.get_end_time():.2f} 秒")
-    print(f"✓ 总音符数量: {total_notes}")
-    print(f"✓ Track数量: 2 (Melody + Accompaniment)")
-    print(f"✓ BPM: {tempo}")
-    print("="*50)
+    @staticmethod
+    def _ensure_dir(path):
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
