@@ -47,17 +47,20 @@ class ModelConfig:
     intermediate_size: int = 3072
     max_position_embeddings: int = 3500
     markoffset = 81  # 位置标记起始ID
-    measures_length = 88  # 每个小节的最大长度（单位：位置标记数） 257
-    offset = 257
+    measures_length = 88  # 每个小节的最大长度（单位：位置标记数）
     patch_h = 1  # 音高方向的patch大小
     patch_w = 4  # 时间方向的patch大小
 
-    pad_token_id: int = 257 + 1
+    # Token IDs
+    track_marker_acc_id: int = 170   # acc 轨结束标记
+    track_marker_mel_id: int = 171   # mel 轨结束标记
+    beat_marker_id: int = 172        # 拍分隔符
+    bar_token_id: int = 255
+    eos_token_id: int = 256
     bos_token_id: int = 257
-    eos_token_id: int = 257 - 1  
-    bar_token_id: int = 257 - 2
+    pad_token_id: int = 258
     time_sig_offset_id: int = 259
-    bpm_offset_id: int = 259 + 5  
+    bpm_offset_id: int = 264
     train_cutoff_len = 2048  # 训练时的截断长度
     rope_theta: float = 10000.0  # RoPE base
     dropout = 0.1

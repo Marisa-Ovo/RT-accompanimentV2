@@ -1,72 +1,109 @@
 """
-Piano Roll Tokenizer - 钢琴卷帘编解码器
+PianoMusicTokenizer - 钢琴音乐完整编解码系统
 
-统一管理piano roll与token之间的编解码逻辑，包括：
-- Patch-based tokenization (三进制编码)
-- 相对位置压缩编码
-- 双通道piano roll重建
+三层架构：
+  Layer 1 (PatchCodec):       Piano roll <-> patch token matrix (三进制编码)
+  Layer 2 (Beat encoding):    Measure (4,88,t) -> 逐拍压缩 token 列表
+  Layer 3 (SequenceBuilder):  Measures + metadata -> 训练/推理就绪的 token 序列
 
-Author: Optimized from original implementation
+序列格式 (beat-marker):
+  [BOS][TS][BPM] [bar][beat][acc...track_acc][mel...track_mel] [beat]... [bar]... [EOS]
 """
 
 import numpy as np
 import torch
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, List, Dict
+from dataclasses import dataclass
 
 
-class PianoRollTokenizer:
+# ============================================================================
+#  Vocabulary — 所有 token ID 的唯一定义处
+# ============================================================================
+
+@dataclass(frozen=True)
+class Vocabulary:
     """
-    钢琴卷帘(Piano Roll)的Token编解码器
+    集中管理所有 token ID，消除 magic number。
+    frozen=True 防止运行时意外修改。
+    """
+    # --- Patch codec 标记 ---
+    empty_marker: int = 169
+    track_marker_acc: int = 170       # acc 轨结束标记
+    track_marker_mel: int = 171       # mel 轨结束标记
+    beat_marker: int = 172            # 拍分隔符
 
-    功能：
-    1. 将双通道piano roll (sustain + onset) 转换为patch tokens
-    2. 使用相对位置编码压缩token序列
-    3. 支持完整的编码-解码循环
+    # --- Codec 参数 ---
+    marker_offset: int = 81
+    measures_length: int = 88
+    img_h: int = 88
 
-    参数：
-        patch_h: patch高度（默认2，对应2个音高）
-        patch_w: patch宽度（默认4，对应4个时间步）
-        marker_offset: 相对位置标记的偏移量（默认81）
-        measures_length: 每个measure的pitch数量（默认88键）
-        end_marker_part0: part0的结束标记ID（默认170）
-        end_marker_part1: part1的结束标记ID（默认171）
-        empty_marker: 空measure的标记ID（默认169）
-        img_h: 图像高度，即钢琴键数（默认88）
+    # --- 序列级 token ---
+    bar_token_id: int = 255
+    eos_token_id: int = 256
+    bos_token_id: int = 257
+    pad_token_id: int = 258
+    time_sig_offset_id: int = 259
+    bpm_offset_id: int = 264          # = 259 + 5
 
-    示例：
-        >>> tokenizer = PianoRollTokenizer(patch_h=2, patch_w=4)
-        >>> # 编码
-        >>> image = np.random.randint(0, 2, (2, 88, 16))
-        >>> compressed = tokenizer.encode(image)
-        >>> # 解码
-        >>> reconstructed = tokenizer.decode(compressed, num_measures=4)
+    # --- BPM 分桶阈值 ---
+    bpm_slow_threshold: int = 90
+    bpm_fast_threshold: int = 200
+
+    # --- Patch 默认尺寸 ---
+    default_patch_h: int = 1
+    default_patch_w: int = 4
+
+    @classmethod
+    def from_config(cls, config) -> 'Vocabulary':
+        """从 ModelConfig 创建 Vocabulary，用 config 值覆盖默认值。"""
+        return cls(
+            track_marker_acc=config.track_marker_acc_id,
+            track_marker_mel=config.track_marker_mel_id,
+            beat_marker=config.beat_marker_id,
+            bar_token_id=config.bar_token_id,
+            eos_token_id=config.eos_token_id,
+            bos_token_id=config.bos_token_id,
+            pad_token_id=config.pad_token_id,
+            time_sig_offset_id=config.time_sig_offset_id,
+            bpm_offset_id=config.bpm_offset_id,
+            marker_offset=config.markoffset,
+            measures_length=config.measures_length,
+            default_patch_h=config.patch_h,
+            default_patch_w=config.patch_w,
+        )
+
+
+@dataclass
+class GenerationStep:
+    """生成计划中的单个步骤。"""
+    action: str   # "inject" = 注入已知tokens, "inject_gt" = 注入GT, "generate" = 自回归生成
+    data: Optional[torch.Tensor] = None
+
+
+# ============================================================================
+#  PatchCodec — Layer 1: piano roll <-> patch token matrix
+# ============================================================================
+
+class PatchCodec:
+    """
+    底层 patch 编解码器。
+    处理 (sustain, onset) 双通道 piano roll 与三进制 patch token 矩阵之间的转换。
     """
 
     def __init__(
         self,
         patch_h: int = 1,
         patch_w: int = 4,
-        marker_offset: int = 81,
-        measures_length: int = 88,
-        end_marker_part0: int = 170,
-        end_marker_part1: int = 171,
-        empty_marker: int = 169,
-        img_h: int = 88
+        img_h: int = 88,
     ):
         self.patch_h = patch_h
         self.patch_w = patch_w
-        self.marker_offset = marker_offset
-        self.measures_length = measures_length
-        self.end_marker_part0 = end_marker_part0
-        self.end_marker_part1 = end_marker_part1
-        self.empty_marker = empty_marker
         self.img_h = img_h
 
-        # 预计算patch相关参数
         self.patch_size = patch_h * patch_w
         self.powers_3 = 3 ** np.arange(self.patch_size - 1, -1, -1)
 
-        # 特殊token替换规则（用于strict模式）
+        # strict 模式的特殊 token 替换规则
         self.special_token_ids = [
             13, 12, 59, 31, 64, 11, 55, 73, 37, 30,
             28, 5, 15, 46, 16, 17, 10, 14, 32, 19,
@@ -74,393 +111,550 @@ class PianoRollTokenizer:
         ]
         self.replacement_ids = [0, 67, 7, 40, 63]
 
-    def encode(
-        self,
-        image: Union[np.ndarray, torch.Tensor],
-        use_strict_mode: bool = True
-    ) -> np.ndarray:
-        """
-        完整编码流程：piano roll → compressed tokens
-
-        Args:
-            image: shape (2, 88, t) 的双通道piano roll
-                   ch0: sustain, ch1: onset
-            use_strict_mode: 是否使用严格模式（替换特殊token）
-
-        Returns:
-            compressed_sequence: 一维压缩token序列
-        """
-        tokens = self.image_to_patch_tokens(image, strict_mode=use_strict_mode)
-        compressed = self.compress_tokens(tokens)
-        return compressed
-
-    def decode(
-        self,
-        compressed_sequence: Union[np.ndarray, list],
-        end_marker_id: Optional[int] = None
-    ) -> np.ndarray:
-        """
-        完整解码流程：compressed tokens → piano roll
-
-        Args:
-            compressed_sequence: 压缩的token序列
-            end_marker_id: 结束标记ID（如果为None，支持part0和part1两种）
-
-        Returns:
-            image: shape (2, 88, t) 的双通道piano roll
-        """
-        tokens = self.decompress_tokens(compressed_sequence, end_marker_id)
-        image = self.patch_tokens_to_image(tokens)
-        return image
-
-    # ==================== 编码相关方法 ====================
+    # ---- 编码 ----
 
     def image_to_patch_tokens(
         self,
         image: Union[np.ndarray, torch.Tensor],
-        strict_mode: bool = True
+        strict_mode: bool = True,
     ) -> np.ndarray:
         """
-        将双通道piano roll转换为patch tokens（三进制编码）
+        双通道 piano roll → patch token 矩阵（三进制编码）。
 
         Args:
-            image: shape (2, 88, t) 的双通道piano roll
-                   ch0: sustain, ch1: onset
-            strict_mode: 是否替换特殊token
+            image: (2, 88, t) — ch0: sustain, ch1: onset
+            strict_mode: 是否替换特殊 token
 
         Returns:
-            tokens: shape (num_time_patches, num_pitch_patches) 的token矩阵
-
-        编码规则：
-            0: 无音符 (sustain=0, onset=0)
-            1: 只有sustain (sustain=1, onset=0)
-            2: onset和sustain都有 (sustain=1, onset=1)
+            tokens: (num_time_patches, num_pitch_patches)
         """
         if isinstance(image, torch.Tensor):
             image = image.cpu().numpy()
 
-        # 确保输入是双通道
         assert image.shape[0] == 2, f"Expected 2 channels, got {image.shape[0]}"
 
-        sustain_channel = image[0].copy()  # shape: (88, t)
-        onset_channel = image[1].copy()    # shape: (88, t)
+        sustain = image[0].copy()
+        onset = image[1].copy()
+        onset[sustain == 0] = 0
 
-        # onset只能出现在sustain为1的地方
-        onset_channel[sustain_channel == 0] = 0
+        img_h, img_w = sustain.shape
 
-        img_h, img_w = sustain_channel.shape
-
-        # 处理宽度padding（确保可以整除patch_w）
         padding_w = (self.patch_w - img_w % self.patch_w) % self.patch_w
         if padding_w > 0:
-            sustain_channel = np.pad(
-                sustain_channel,
-                ((0, 0), (0, padding_w)),
-                mode='constant',
-                constant_values=0
-            )
-            onset_channel = np.pad(
-                onset_channel,
-                ((0, 0), (0, padding_w)),
-                mode='constant',
-                constant_values=0
-            )
-            img_w = sustain_channel.shape[1]
+            sustain = np.pad(sustain, ((0, 0), (0, padding_w)), constant_values=0)
+            onset = np.pad(onset, ((0, 0), (0, padding_w)), constant_values=0)
+            img_w = sustain.shape[1]
 
-        num_patch_rows = img_h // self.patch_h
-        num_patch_cols = img_w // self.patch_w
+        n_rows = img_h // self.patch_h
+        n_cols = img_w // self.patch_w
 
-        # 重塑为patches
-        sustain_patches = self._reshape_to_patches(sustain_channel, num_patch_rows, num_patch_cols)
-        onset_patches = self._reshape_to_patches(onset_channel, num_patch_rows, num_patch_cols)
+        sustain_p = self._reshape_to_patches(sustain, n_rows, n_cols)
+        onset_p = self._reshape_to_patches(onset, n_rows, n_cols)
 
-        # 组合成三进制编码
-        combined_patches = sustain_patches.astype(np.int64) + onset_patches.astype(np.int64)
+        combined = sustain_p.astype(np.int64) + onset_p.astype(np.int64)
+        tokens = np.dot(combined, self.powers_3)
 
-        # 使用三进制计算token值
-        tokens = np.dot(combined_patches, self.powers_3)
-
-        # 处理特殊token（strict模式）
         if strict_mode:
             tokens = self._replace_special_tokens(tokens)
 
         return tokens
 
-    def _reshape_to_patches(
-        self,
-        channel: np.ndarray,
-        num_patch_rows: int,
-        num_patch_cols: int
-    ) -> np.ndarray:
-        """将通道重塑为patches"""
-        patches = channel.reshape(num_patch_rows, self.patch_h, num_patch_cols, self.patch_w)
-        patches = patches.transpose(2, 0, 1, 3)  # (cols, rows, h, w)
-        patches = patches.reshape(num_patch_cols, num_patch_rows, self.patch_size)
-        return patches
+    def _reshape_to_patches(self, ch: np.ndarray, n_rows: int, n_cols: int) -> np.ndarray:
+        p = ch.reshape(n_rows, self.patch_h, n_cols, self.patch_w)
+        p = p.transpose(2, 0, 1, 3)
+        return p.reshape(n_cols, n_rows, self.patch_size)
 
     def _replace_special_tokens(self, tokens: np.ndarray) -> np.ndarray:
-        """随机替换特殊token"""
         mask = np.isin(tokens, self.special_token_ids)
         if np.any(mask):
-            num_replacements = np.sum(mask)
-            random_replacements = np.random.choice(self.replacement_ids, size=num_replacements)
             tokens = tokens.copy()
-            tokens[mask] = random_replacements
+            tokens[mask] = np.random.choice(self.replacement_ids, size=int(np.sum(mask)))
         return tokens
+
+    # ---- 解码 ----
+
+    def patch_tokens_to_image(self, tokens: np.ndarray) -> np.ndarray:
+        """
+        token 矩阵 → 双通道 piano roll (2, 88, t)。
+        """
+        n_cols, n_rows = tokens.shape
+
+        combined = np.zeros((n_cols, n_rows, self.patch_size), dtype=np.int64)
+        tmp = tokens.copy()
+        for i in range(self.patch_size):
+            combined[:, :, i] = tmp // self.powers_3[i]
+            tmp = tmp % self.powers_3[i]
+
+        sustain_p = (combined >= 1).astype(np.float32)
+        onset_p = (combined == 2).astype(np.float32)
+
+        sustain_ch = self._patches_to_channel(sustain_p, n_cols, n_rows)
+        onset_ch = self._patches_to_channel(onset_p, n_cols, n_rows)
+
+        return np.stack([sustain_ch, onset_ch], axis=0)
+
+    def _patches_to_channel(self, patches: np.ndarray, n_cols: int, n_rows: int) -> np.ndarray:
+        p = patches.reshape(n_cols, n_rows, self.patch_h, self.patch_w)
+        p = p.transpose(1, 2, 0, 3)
+        return p.reshape(self.img_h, n_cols * self.patch_w)
+
+
+# ============================================================================
+#  PianoMusicTokenizer — 完整的音乐 tokenizer
+# ============================================================================
+
+class PianoMusicTokenizer:
+    """
+    钢琴音乐的完整 tokenizer。
+
+    组合 PatchCodec + Vocabulary，提供从原始 piano roll 到训练就绪
+    token 序列的全部编解码功能。这是所有 tokenization 操作的唯一入口。
+
+    序列格式:
+      [BOS][TS][BPM] [bar][beat][acc...track_acc][mel...track_mel] [beat]... [bar]... [EOS]
+    """
+
+    def __init__(
+        self,
+        vocab: Optional[Vocabulary] = None,
+        config=None,
+    ):
+        if vocab is None and config is not None:
+            self.vocab = Vocabulary.from_config(config)
+        elif vocab is not None:
+            self.vocab = vocab
+        else:
+            self.vocab = Vocabulary()
+
+        self._codec = PatchCodec(
+            patch_h=self.vocab.default_patch_h,
+            patch_w=self.vocab.default_patch_w,
+            img_h=self.vocab.img_h,
+        )
+
+    # ===================== Layer 1: 压缩 / 解压 =====================
 
     def compress_tokens(
         self,
-        token_indices_flat: np.ndarray,
-        end_marker: Optional[int] = None
+        token_matrix: np.ndarray,
+        track_marker: int,
     ) -> np.ndarray:
         """
-        使用相对位置编码压缩token序列
+        使用相对位置编码压缩 token 矩阵。
 
         Args:
-            token_indices_flat: shape (num_measures, measures_length) 的token矩阵
-            end_marker: 结束标记（如果为None，使用end_marker_part0）
+            token_matrix: (num_measures, measures_length) 的 token 矩阵
+            track_marker: 轨道结束标记 (track_marker_acc 或 track_marker_mel)
 
         Returns:
-            compressed_sequence: 压缩后的一维序列
-
-        编码格式：
-            非空: [相对pos0] [token0] [相对pos1] [token1] ... [end_marker]
-                  - 第一个音符：相对于0的位置（即绝对位置）
-                  - 后续音符：相对于上一个音符的距离
-            空:   [empty_marker]
+            compressed: 压缩后的一维序列
         """
-        if end_marker is None:
-            end_marker = self.end_marker_part0
+        v = self.vocab
 
-        compressed_sequences = []
-
-        for measure_tokens in token_indices_flat:
-            # 找到所有非零token的位置
-            non_zero_indices = np.where(measure_tokens != 0)[0]
-
-            if len(non_zero_indices) == 0:
-                # 空measure
-                compressed = [self.empty_marker]
+        compressed_seqs = []
+        for row in token_matrix:
+            nz = np.where(row != 0)[0]
+            if len(nz) == 0:
+                compressed_seqs.append(np.array([v.empty_marker, track_marker], dtype=np.int64))
             else:
-                # 非空measure
-                compressed = []
-                prev_idx = 0
+                parts = []
+                prev = 0
+                for idx in nz:
+                    parts.extend([v.marker_offset + (idx - prev), row[idx]])
+                    prev = idx
+                parts.append(track_marker)
+                compressed_seqs.append(np.array(parts, dtype=np.int64))
 
-                # 添加 [相对位置, token值] 对
-                for idx in non_zero_indices:
-                    relative_position = idx - prev_idx
-                    position_marker = self.marker_offset + relative_position
-                    token_value = measure_tokens[idx]
-
-                    compressed.extend([position_marker, token_value])
-                    prev_idx = idx
-
-                # 添加结束标记
-                compressed.append(end_marker)
-
-            compressed_sequences.append(np.array(compressed, dtype=np.int64))
-
-        # 连接所有measures
-        flattened_sequence = np.concatenate(compressed_sequences)
-        return flattened_sequence
-
-    # ==================== 解码相关方法 ====================
+        return np.concatenate(compressed_seqs)
 
     def decompress_tokens(
         self,
-        compressed_sequence: Union[np.ndarray, list],
-        end_marker_id: Optional[int] = None
+        compressed: Union[np.ndarray, list],
+        track_marker_id: int,
     ) -> np.ndarray:
         """
-        解压缩token序列（相对位置编码 → token矩阵）
+        解压缩 token 序列 → token 矩阵。
 
         Args:
-            compressed_sequence: 压缩的token序列
-            end_marker_id: 结束标记（如果为None，支持part0和part1两种）
+            compressed: 压缩 token 序列
+            track_marker_id: 轨道结束标记 ID
 
         Returns:
-            decompressed_measures: shape (num_measures, measures_length) 的token矩阵
+            (num_measures, measures_length)
         """
-        if isinstance(compressed_sequence, list):
-            compressed_sequence = np.array(compressed_sequence, dtype=np.int64)
+        v = self.vocab
+        if isinstance(compressed, list):
+            compressed = np.array(compressed, dtype=np.int64)
 
-        decompressed_measures = []
+        measures = []
         i = 0
 
-        while i < len(compressed_sequence):
-            current_token = compressed_sequence[i]
-
-            if current_token == self.empty_marker:
-                # 空measure
-                measure = np.zeros(self.measures_length, dtype=np.int64)
-                decompressed_measures.append(measure)
+        while i < len(compressed):
+            row = np.zeros(v.measures_length, dtype=np.int64)
+            abs_pos = 0
+            while i < len(compressed):
+                tok = compressed[i]
                 i += 1
-            else:
-                # 非空measure - 当前token是第一个相对位置标记
-                measure = np.zeros(self.measures_length, dtype=np.int64)
-                current_abs_pos = 0
-
-                # 读取位置-token对，直到遇到end_marker
-                while i < len(compressed_sequence):
-                    position_marker = compressed_sequence[i]
+                if tok == track_marker_id:
+                    break
+                if i >= len(compressed):
+                    break
+                if tok == v.empty_marker:
                     i += 1
+                    continue
+                val = compressed[i]
+                i += 1
+                abs_pos += tok - v.marker_offset
+                if 0 <= abs_pos < v.measures_length:
+                    row[abs_pos] = val
+            measures.append(row)
 
-                    # 检查是否是结束标记
-                    if self._is_end_marker(position_marker, end_marker_id):
-                        break
+        return np.stack(measures, axis=0)
 
-                    if i >= len(compressed_sequence):
-                        break
+    # ===================== Layer 2: Beat 级编码 =====================
 
-                    # 读取token值
-                    token_value = compressed_sequence[i]
-                    i += 1
-
-                    # 计算绝对位置（累加相对位置）
-                    relative_pos = position_marker - self.marker_offset
-                    current_abs_pos += relative_pos
-
-                    # 填充token
-                    if 0 <= current_abs_pos < self.measures_length:
-                        measure[current_abs_pos] = token_value
-
-                decompressed_measures.append(measure)
-
-        return np.stack(decompressed_measures, axis=0)
-
-    def _is_end_marker(self, token: int, end_marker_id: Optional[int]) -> bool:
-        """检查是否是结束标记"""
-        if end_marker_id is not None:
-            return token == end_marker_id
-        # 支持part0和part1的结束标记
-        return token in [self.end_marker_part0, self.end_marker_part1]
-
-    def patch_tokens_to_image(
+    def encode_measure(
         self,
-        tokens: np.ndarray
-    ) -> np.ndarray:
+        measure: np.ndarray,
+        timesteps_per_beat: int = 4,
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """
-        从tokens重建双通道piano roll
+        将 4 通道 measure 编码为逐拍 (acc, mel) 压缩 token 对。
 
         Args:
-            tokens: shape (num_time_patches, num_pitch_patches) 的token矩阵
+            measure: (4, 88, t) — ch0:2 = mel(part0), ch2:4 = acc(part1)
+            timesteps_per_beat: 每拍的时间步数
 
         Returns:
-            image: shape (2, 88, t) 的双通道piano roll
-                   ch0: sustain, ch1: onset
+            beats: List[(acc_tensor, mel_tensor)] — 每元素对应一拍
         """
-        num_patch_cols, num_patch_rows = tokens.shape
+        v = self.vocab
+        t = measure.shape[2]
+        beat_len = timesteps_per_beat
+        num_beats = (t + beat_len - 1) // beat_len
 
-        # 解码tokens为三进制表示
-        combined_patches = np.zeros(
-            (num_patch_cols, num_patch_rows, self.patch_size),
-            dtype=np.int64
-        )
-        temp_tokens = tokens.copy()
+        beats = []
 
-        for i in range(self.patch_size):
-            combined_patches[:, :, i] = temp_tokens // self.powers_3[i]
-            temp_tokens = temp_tokens % self.powers_3[i]
+        for b in range(num_beats):
+            s = b * beat_len
+            e = min(s + beat_len, t)
+            beat = measure[:, :, s:e]
 
-        # 从三进制值恢复双通道
-        # 0 -> sustain=0, onset=0
-        # 1 -> sustain=1, onset=0
-        # 2 -> sustain=1, onset=1
-        sustain_patches = (combined_patches >= 1).astype(np.float32)
-        onset_patches = (combined_patches == 2).astype(np.float32)
+            if e - s < beat_len:
+                pad_w = beat_len - (e - s)
+                beat = np.pad(beat, ((0, 0), (0, 0), (0, pad_w)), constant_values=0)
 
-        # 重建图像
-        sustain_channel = self._patches_to_channel(
-            sustain_patches,
-            num_patch_cols,
-            num_patch_rows
-        )
-        onset_channel = self._patches_to_channel(
-            onset_patches,
-            num_patch_cols,
-            num_patch_rows
-        )
+            # mel: channels 0-1
+            tokens_mel = self._codec.image_to_patch_tokens(beat[:2], strict_mode=True)
+            comp_mel = self.compress_tokens(tokens_mel, track_marker=v.track_marker_mel)
 
-        # 组合成双通道
-        image = np.stack([sustain_channel, onset_channel], axis=0)
-        return image
+            # acc: channels 2-3
+            tokens_acc = self._codec.image_to_patch_tokens(beat[2:], strict_mode=True)
+            comp_acc = self.compress_tokens(tokens_acc, track_marker=v.track_marker_acc)
 
-    def _patches_to_channel(
+            beats.append((
+                torch.tensor(comp_acc, dtype=torch.long),
+                torch.tensor(comp_mel, dtype=torch.long),
+            ))
+
+        return beats
+
+    def encode_bpm(self, bpm) -> int:
+        """BPM 值 → token ID（已包含 offset）。"""
+        v = self.vocab
+        if bpm is None:
+            bucket = 3  # UNK
+        else:
+            bpm_int = int(bpm)
+            if bpm_int < v.bpm_slow_threshold:
+                bucket = 0
+            elif bpm_int <= v.bpm_fast_threshold:
+                bucket = 1
+            else:
+                bucket = 2
+        return bucket + v.bpm_offset_id
+
+    def encode_time_sig(self, time_sig_idx: int) -> int:
+        """拍号索引 → token ID（已包含 offset，含 2/2 拍特殊映射）。"""
+        if time_sig_idx == 9:
+            time_sig_idx = 4
+        return time_sig_idx + self.vocab.time_sig_offset_id
+
+    # ===================== 内部: 编码所有小节 =====================
+
+    def _encode_measures(
         self,
-        patches: np.ndarray,
-        num_patch_cols: int,
-        num_patch_rows: int
-    ) -> np.ndarray:
-        """将patches重建为通道"""
-        patches = patches.reshape(num_patch_cols, num_patch_rows, self.patch_h, self.patch_w)
-        patches = patches.transpose(1, 2, 0, 3)  # (rows, h, cols, w)
-        channel = patches.reshape(self.img_h, num_patch_cols * self.patch_w)
-        return channel
+        measures: List[np.ndarray],
+        metadata: dict,
+        timesteps_per_beat: int = 4,
+        pitch_shift: int = 0,
+    ) -> Tuple[int, int, bool, List[List[Tuple[torch.Tensor, torch.Tensor]]]]:
+        """
+        编码所有小节，返回按小节分组的 (acc, mel) 拍对。
 
-    # ==================== 工具方法 ====================
+        Returns:
+            (ts_token, bpm_token, is_continuation, measure_beats)
+            measure_beats: List[List[(acc_tensor, mel_tensor)]]
+                第一层按小节分组，第二层按拍分组
+        """
+        ts_token = self.encode_time_sig(metadata['time_signature_idx'])
+        bpm_token = self.encode_bpm(metadata['bpm'])
+        is_continuation = metadata.get('is_continuation', False)
+
+        measure_beats = []
+        for measure in measures:
+            if pitch_shift != 0:
+                measure = np.roll(measure, pitch_shift, axis=1)
+                if pitch_shift > 0:
+                    measure[:, :pitch_shift, :] = 0
+                else:
+                    measure[:, pitch_shift:, :] = 0
+
+            beats = self.encode_measure(measure, timesteps_per_beat)
+            measure_beats.append(beats)
+
+        return ts_token, bpm_token, is_continuation, measure_beats
+
+    # ===================== Layer 3: 完整序列构建 =====================
+
+    def build_training_sequence(
+        self,
+        measures: List[np.ndarray],
+        metadata: dict,
+        add_bos: bool = True,
+        timesteps_per_beat: int = 4,
+        pitch_shift: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        构建完整的训练序列 (input_ids, labels)。
+
+        序列格式:
+          [BOS][TS][BPM] [bar][beat][acc...track_acc][mel...track_mel] [beat]... [bar]... [EOS]
+
+        Labels: bar/beat_marker/mel 部分用 pad_token_id 填充（不参与 loss），
+                acc 部分作为预测目标。
+
+        Returns:
+            (input_ids, labels): 均为 1D torch.long tensor。
+        """
+        v = self.vocab
+        ts_token, bpm_token, is_continuation, measure_beats = self._encode_measures(
+            measures, metadata, timesteps_per_beat, pitch_shift)
+
+        inp_parts = []
+        lbl_parts = []
+
+        for beats in measure_beats:
+            # [bar]
+            bar = torch.tensor([v.bar_token_id], dtype=torch.long)
+            inp_parts.append(bar)
+            lbl_parts.append(torch.full_like(bar, v.pad_token_id))
+
+            for acc, mel in beats:
+                # [beat_marker] — 结构标记，不参与 loss
+                bm = torch.tensor([v.beat_marker], dtype=torch.long)
+                inp_parts.append(bm)
+                lbl_parts.append(torch.full_like(bm, v.pad_token_id))
+
+                # [acc tokens] — 预测目标
+                inp_parts.append(acc)
+                lbl_parts.append(acc)
+
+                # [mel tokens] — 条件输入，不参与 loss
+                inp_parts.append(mel)
+                lbl_parts.append(torch.full_like(mel, v.pad_token_id))
+
+        measure_inp = torch.cat(inp_parts)
+        measure_lbl = torch.cat(lbl_parts)
+
+        # [BOS] + TS + BPM + content + [EOS]
+        seq_inp = []
+        seq_lbl = []
+
+        if add_bos:
+            bos = torch.tensor([v.bos_token_id], dtype=torch.long)
+            seq_inp.append(bos)
+            seq_lbl.append(torch.full_like(bos, v.pad_token_id))
+
+        ts_t = torch.tensor([ts_token], dtype=torch.long)
+        bp_t = torch.tensor([bpm_token], dtype=torch.long)
+        seq_inp.extend([ts_t, bp_t])
+        seq_lbl.extend([
+            torch.full_like(ts_t, v.pad_token_id),
+            torch.full_like(bp_t, v.pad_token_id),
+        ])
+
+        seq_inp.append(measure_inp)
+        seq_lbl.append(measure_lbl)
+
+        if not is_continuation:
+            eos = torch.tensor([v.eos_token_id], dtype=torch.long)
+            seq_inp.append(eos)
+            seq_lbl.append(eos)
+
+        return torch.cat(seq_inp), torch.cat(seq_lbl)
+
+    def build_generation_schedule(
+        self,
+        measures: List[np.ndarray],
+        metadata: dict,
+        gt_prefix_beats: int = 0,
+        timesteps_per_beat: int = 4,
+    ) -> Dict:
+        """
+        构建推理生成计划。调度与执行分离：tokenizer 决定"做什么"，model 决定"怎么做"。
+
+        Schedule 结构 (每小节):
+          inject[bar] → { inject[beat] → generate/inject_gt acc → inject mel } × num_beats
+
+        Returns:
+            dict:
+                'initial_tokens': [BOS, TS, BPM] tensor
+                'schedule': List[GenerationStep]
+                'mel_beats': List[torch.Tensor] — 所有 mel 拍数据（用于解码）
+                'acc_beats_gt': List[torch.Tensor] — 所有 acc 拍 GT（用于参考）
+        """
+        v = self.vocab
+        ts_token, bpm_token, _, measure_beats = self._encode_measures(
+            measures, metadata, timesteps_per_beat)
+
+        initial = torch.tensor(
+            [v.bos_token_id, ts_token, bpm_token], dtype=torch.long)
+
+        steps = []
+        mel_beats_all = []
+        acc_beats_gt_all = []
+        beat_idx = 0  # 全局拍计数，用于 GT 前缀判断
+
+        for beats in measure_beats:
+            # inject [bar]
+            steps.append(GenerationStep("inject", torch.tensor([v.bar_token_id], dtype=torch.long)))
+
+            for acc, mel in beats:
+                # inject [beat_marker]
+                steps.append(GenerationStep("inject", torch.tensor([v.beat_marker], dtype=torch.long)))
+
+                # acc: GT 前缀 → inject_gt / 其他 → 自回归生成
+                if beat_idx < gt_prefix_beats:
+                    steps.append(GenerationStep("inject_gt", acc))
+                else:
+                    steps.append(GenerationStep("generate"))
+
+                # mel: 始终注入
+                steps.append(GenerationStep("inject", mel))
+
+                mel_beats_all.append(mel)
+                acc_beats_gt_all.append(acc)
+                beat_idx += 1
+
+        return {
+            'initial_tokens': initial,
+            'schedule': steps,
+            'mel_beats': mel_beats_all,
+            'acc_beats_gt': acc_beats_gt_all,
+        }
+
+    # ===================== 解码 =====================
+
+    def decode_beats_to_pianoroll(
+        self,
+        beats_list: list,
+        track_marker_id: int,
+    ) -> np.ndarray:
+        """
+        beat token 列表 → piano roll (2, 88, t)。
+
+        Args:
+            beats_list: beat token 的列表（tensor / list / int 混合均可）
+            track_marker_id: 轨道结束标记 ID（track_marker_acc 或 track_marker_mel）
+
+        Returns:
+            pianoroll: (2, 88, t)
+        """
+        v = self.vocab
+
+        # 展平
+        flat = []
+        for beat in beats_list:
+            if isinstance(beat, torch.Tensor):
+                flat.extend(beat.cpu().tolist())
+            elif isinstance(beat, (list, np.ndarray)):
+                flat.extend(beat if isinstance(beat, list) else beat.tolist())
+            else:
+                flat.append(beat)
+
+        # 过滤掉 >= beat_marker 的结构标记（bar, bos, eos, pad, ts, bpm 等）
+        # 保留: patch tokens(0-80), position markers(81-168), empty(169), track markers(170-171)
+        filtered = np.array([t for t in flat if t < v.beat_marker], dtype=np.int64)
+
+        if len(filtered) == 0:
+            return np.zeros((2, v.img_h, 0), dtype=np.float32)
+
+        # 解压 → token 矩阵 → piano roll
+        mat = self.decompress_tokens(filtered, track_marker_id=track_marker_id)
+        return self._codec.patch_tokens_to_image(mat)
+
+    # ===================== 工具方法 =====================
+
+    def estimate_sequence_length(
+        self,
+        measures: List[np.ndarray],
+        timesteps_per_beat: int = 4,
+    ) -> int:
+        """
+        估算 token 序列长度（用于长度缓存预计算）。
+
+        格式: [BOS][TS][BPM] + {[bar] + num_beats × ([beat] + acc + mel)} × num_measures + [EOS]
+        """
+        total = 4  # BOS + time_sig + BPM + EOS
+
+        for measure in measures:
+            beats = self.encode_measure(measure, timesteps_per_beat)
+            total += 1  # bar token
+            for acc, mel in beats:
+                total += 1  # beat_marker
+                total += len(acc)
+                total += len(mel)
+
+        return total
 
     def get_config(self) -> dict:
-        """返回配置字典"""
+        """返回配置字典。"""
+        v = self.vocab
         return {
-            'patch_h': self.patch_h,
-            'patch_w': self.patch_w,
-            'marker_offset': self.marker_offset,
-            'measures_length': self.measures_length,
-            'end_marker_part0': self.end_marker_part0,
-            'end_marker_part1': self.end_marker_part1,
-            'empty_marker': self.empty_marker,
-            'img_h': self.img_h
+            'patch_h': v.default_patch_h,
+            'patch_w': v.default_patch_w,
+            'marker_offset': v.marker_offset,
+            'measures_length': v.measures_length,
+            'track_marker_acc': v.track_marker_acc,
+            'track_marker_mel': v.track_marker_mel,
+            'beat_marker': v.beat_marker,
+            'empty_marker': v.empty_marker,
+            'img_h': v.img_h,
         }
 
     def __repr__(self) -> str:
+        v = self.vocab
         return (
-            f"PianoRollTokenizer("
-            f"patch_size={self.patch_h}x{self.patch_w}, "
-            f"img_h={self.img_h}, "
-            f"marker_offset={self.marker_offset})"
+            f"PianoMusicTokenizer("
+            f"patch={v.default_patch_h}x{v.default_patch_w}, "
+            f"img_h={v.img_h}, "
+            f"marker_offset={v.marker_offset})"
         )
 
 
-# ==================== 便捷函数（保持向后兼容） ====================
+# ============================================================================
+#  向后兼容别名
+# ============================================================================
 
-# 创建全局默认tokenizer实例
-_default_tokenizer = PianoRollTokenizer()
+PianoRollTokenizer = PatchCodec
 
 
 def image_to_patch_tokens_vectorized_strict(image, H=2, W=4):
-    """向后兼容的函数包装"""
-    tokenizer = PianoRollTokenizer(patch_h=H, patch_w=W)
-    return tokenizer.image_to_patch_tokens(image, strict_mode=True)
+    codec = PatchCodec(patch_h=H, patch_w=W)
+    return codec.image_to_patch_tokens(image, strict_mode=True)
 
 
 def patch_tokens_to_image_vectorized(tokens, H=2, W=4, img_h=88):
-    """向后兼容的函数包装"""
-    tokenizer = PianoRollTokenizer(patch_h=H, patch_w=W, img_h=img_h)
-    return tokenizer.patch_tokens_to_image(tokens)
-
-
-def compress_tokens_v2(token_indices_flat, marker_offset=81, measures_length=88,
-                       end_marker=None, empty_marker=169):
-    """向后兼容的函数包装"""
-    if end_marker is None:
-        end_marker = 170
-    tokenizer = PianoRollTokenizer(
-        marker_offset=marker_offset,
-        measures_length=measures_length,
-        end_marker_part0=end_marker,
-        empty_marker=empty_marker
-    )
-    return tokenizer.compress_tokens(token_indices_flat, end_marker=end_marker)
-
-
-def decompress_tokens_v3(compressed_sequence, marker_offset=81, measures_length=88,
-                         end_marker_id_1=None, end_marker_id_2=None, empty_marker=169):
-    """向后兼容的函数包装"""
-    tokenizer = PianoRollTokenizer(
-        marker_offset=marker_offset,
-        measures_length=measures_length,
-        end_marker_part0=end_marker_id_1 or 170,
-        end_marker_part1=end_marker_id_2 or 171,
-        empty_marker=empty_marker
-    )
-    return tokenizer.decompress_tokens(compressed_sequence)
+    codec = PatchCodec(patch_h=H, patch_w=W, img_h=img_h)
+    return codec.patch_tokens_to_image(tokens)
