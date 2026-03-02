@@ -208,7 +208,7 @@ def main():
     )
 
     print('初始化模型')
-    checkpoint_path = "/home/cby/not_use/Advanced/generative_newtoken_improved_1_4_relative_track_RT_Accompaniment/checkpoints/steps_20000_1027_1515/model.safetensors"
+    checkpoint_path = "/home/cby/not_use/Advanced_Exp/generative_newtoken_improved_1_4_relative_track_RT_Accompaniment_backup/checkpoints/epoch_4_1104_1204/model.safetensors"
     model = initialize_model(llama_config, checkpoint_path)
 
     # 初始化训练器

@@ -23,15 +23,13 @@ class TrainingConfig:
     log_every_n_steps: int = 20
     tensorboard_log_dir: str = "./logs"
     tensorboard_log_name: str = f"music_transformer_{time}"
-    #data_dir = "/home/lab-wei.zhenao/boyu/Dataset/DATA6_6T/cby/musicxml/chord_retrieve_two_chords_NAfliter3"
-    data_dir = "/DATA2_4T/cby/home/lab-wei.zhenao/boyu/Dataset/allxml_npz_dual_track_optimized"
-    #data_dir = "/home/lab-wei.zhenao/boyu/Dataset/allxml_npz_optimized"
+    data_dir = "/DATA6_6T/cby/musicxml/allxml_npz_dual_track_optimized_no_underscore"
     save_steps = -1
 
     # 测试集配置
     use_test_set: bool = True  # 是否使用测试集
-    test_split_ratio: float = 0.05  # 测试集划分比例（5%作为测试集）
-    test_frequency: float = 0.25  # 测试频率（每0.25个epoch测试一次）
+    test_split_ratio: float = 0.10  # 测试集划分比例（5%作为测试集）
+    test_frequency: float = 0.10  # 测试频率（每0.10个epoch测试一次）
     test_batch_size: int = 4  # 测试时的batch size
     test_save_results: bool = True  # 是否保存测试结果到tensorboard
     random_seed: int = 42  # 数据集划分的随机种子
