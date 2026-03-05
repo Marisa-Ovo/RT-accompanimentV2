@@ -1,2 +1,54 @@
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 训练产物
 logs/
+checkpoints/
+runs/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# 数据文件
+*.npz
+*.npy
+*.mid
+*.midi
+*.wav
+*.mp3
+
+# 推理输出
+output/
+outputs/
+generated/
+
+# 环境
+.env
+*.env
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# 临时
+tmp/
+temp/
+*.tmp
+*.log
