@@ -208,7 +208,9 @@ def main():
     )
 
     print('初始化模型')
-    checkpoint_path = "/home/cby/not_use/Advanced_Exp/generative_newtoken_improved_1_4_relative_track_RT_Accompaniment_backup/checkpoints/epoch_4_1104_1204/model.safetensors"
+    # 如需从 checkpoint 继续训练，填入本地路径，例如：
+    # checkpoint_path = "./checkpoints/epoch_4/model.safetensors"
+    checkpoint_path = None
     model = initialize_model(llama_config, checkpoint_path)
 
     # 初始化训练器

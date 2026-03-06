@@ -23,7 +23,9 @@ class TrainingConfig:
     log_every_n_steps: int = 20
     tensorboard_log_dir: str = "./logs"
     tensorboard_log_name: str = f"music_transformer_{time}"
-    data_dir = "/DATA6_6T/cby/musicxml/allxml_npz_dual_track_optimized_no_underscore"
+    # standard (192K files): allxml_npz_dual_track_optimized_no_underscore
+    # augmented (342K files): allxml_npz_dual_track_optimized
+    data_dir = "/data/home/yuanxin/data/allxml_npz_dual_track_optimized_no_underscore"
     save_steps = -1
 
     # 测试集配置

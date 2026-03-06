@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2.0.0",
     "tqdm>=4.67.0",
     "pretty_midi>=0.2.10",
+    "tensorboard>=2.20.0",
 ]
 
 # PyTorch uses a dedicated index for CUDA builds; uv resolves other packages

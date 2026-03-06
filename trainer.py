@@ -10,7 +10,7 @@ from typing import Optional
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from transformers import get_cosine_schedule_with_warmup
 from tqdm.auto import tqdm
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class TransformerTrainer:
     """Transformer模型训练器
