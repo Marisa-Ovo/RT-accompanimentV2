@@ -185,7 +185,7 @@ def main():
 
     # 数据加载配置
     use_length_aware_batching = True  # 是否使用长度感知batching
-    bucket_size = train_config.train_batch_size  # 每个bucket包含的样本数
+    bucket_size = train_config.train_batch_size*100  # 每个bucket包含的样本数
 
     # 创建模型配置
     llama_config = create_model_config(model_config)
@@ -208,9 +208,7 @@ def main():
     )
 
     print('初始化模型')
-    # 如需从 checkpoint 继续训练，填入本地路径，例如：
-    # checkpoint_path = "./checkpoints/epoch_4/model.safetensors"
-    checkpoint_path = None
+    checkpoint_path = "checkpoints/epoch_5_0306_1830/model.safetensors"
     model = initialize_model(llama_config, checkpoint_path)
 
     # 初始化训练器

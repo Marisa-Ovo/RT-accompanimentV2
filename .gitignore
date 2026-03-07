@@ -6,7 +6,7 @@ __pycache__/
 
 # 训练产物
 logs/
-checkpoints/
+checkpoints*/
 runs/
 *.safetensors
 *.pt
