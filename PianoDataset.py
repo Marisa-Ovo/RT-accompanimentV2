@@ -15,8 +15,16 @@ from my_tokenizer import PianoMusicTokenizer
 class PianoDataset(Dataset):
     """支持长度感知的钢琴音乐数据集"""
 
-    def __init__(self, data_dir, config, cache_lengths=True, mode='train',
-                 test_split_ratio=0.05, random_seed=42):
+    def __init__(
+        self,
+        data_dir,
+        config,
+        cache_lengths=True,
+        mode="train",
+        test_split_ratio=0.05,
+        random_seed=42,
+        acc_drop_prob=0.0,
+    ):
         """
         Args:
             data_dir: 数据目录
@@ -31,38 +39,38 @@ class PianoDataset(Dataset):
         self.mode = mode
         self.test_split_ratio = test_split_ratio
         self.random_seed = random_seed
+        self.acc_drop_prob = acc_drop_prob
 
         # 唯一的 tokenizer 入口
         self.tokenizer = PianoMusicTokenizer(config=config)
 
-        self.data_files = [f for f in os.listdir(self.root_dir) if f.endswith('.npz')]
+        self.data_files = [f for f in os.listdir(self.root_dir) if f.endswith(".npz")]
         print(f"找到 {len(self.data_files)} 个有效的npz文件")
 
         # 长度缓存
-        cache_file = os.path.join(data_dir, '.lengths_cache.pkl')
+        cache_file = os.path.join(data_dir, ".lengths_cache.pkl")
 
         if cache_lengths and os.path.exists(cache_file):
             print("加载长度缓存...")
-            with open(cache_file, 'rb') as f:
+            with open(cache_file, "rb") as f:
                 cache_data = pickle.load(f)
 
-            if (cache_data['patch_h'] != self.tokenizer.vocab.default_patch_h or
-                cache_data['patch_w'] != self.tokenizer.vocab.default_patch_w):
+            if (
+                cache_data["patch_h"] != self.tokenizer.vocab.default_patch_h
+                or cache_data["patch_w"] != self.tokenizer.vocab.default_patch_w
+            ):
                 raise ValueError(
                     f"缓存的patch参数({cache_data['patch_h']}x{cache_data['patch_w']}) "
                     f"与配置({self.tokenizer.vocab.default_patch_h}x{self.tokenizer.vocab.default_patch_w})不匹配"
                 )
 
-            self.data_files = cache_data['data_files']
-            self.file_lengths = cache_data['lengths']
-            self.sorted_indices = cache_data['sorted_indices']
+            self.data_files = cache_data["data_files"]
+            self.file_lengths = cache_data["lengths"]
+            self.sorted_indices = cache_data["sorted_indices"]
             print(f"加载 {len(self.data_files)} 个文件的长度信息")
 
         elif cache_lengths:
-            raise FileNotFoundError(
-                f"长度缓存不存在: {cache_file}\n"
-                f"请先运行: python get_length.py"
-            )
+            raise FileNotFoundError(f"长度缓存不存在: {cache_file}\n请先运行: python get_length.py")
         else:
             self.file_lengths = None
             self.sorted_indices = None
@@ -80,10 +88,10 @@ class PianoDataset(Dataset):
         test_size = int(total * self.test_split_ratio)
         train_size = total - test_size
 
-        if self.mode == 'train':
+        if self.mode == "train":
             sel = indices[:train_size]
             print(f"使用训练集: {len(sel)} 个文件 ({train_size}/{total})")
-        elif self.mode == 'test':
+        elif self.mode == "test":
             sel = indices[train_size:]
             print(f"使用测试集: {len(sel)} 个文件 ({test_size}/{total})")
         else:
@@ -92,15 +100,10 @@ class PianoDataset(Dataset):
         self.data_files = [self.data_files[i] for i in sel]
         if self.file_lengths is not None:
             self.file_lengths = [self.file_lengths[i] for i in sel]
-            self.sorted_indices = sorted(
-                range(len(self.file_lengths)),
-                key=lambda i: self.file_lengths[i]
-            )
+            self.sorted_indices = sorted(range(len(self.file_lengths)), key=lambda i: self.file_lengths[i])
 
     def __len__(self):
         return len(self.data_files)
-
-
 
     def __getitem__(self, idx):
         file_path = os.path.join(self.root_dir, self.data_files[idx])
@@ -108,14 +111,14 @@ class PianoDataset(Dataset):
 
         # 1. 加载原始数据
         save_dict = np.load(file_path, allow_pickle=True)
-        metadata = save_dict['metadata'].item()
-        num_measures = metadata['num_measures']
+        metadata = save_dict["metadata"].item()
+        num_measures = metadata["num_measures"]
 
         # 2. 根据文件名决定是否添加 BOS
         add_bos = True
-        if '_' in file_name:
-            suffix = file_name.split('_')[-1].replace('.npz', '')
-            if suffix != '1' and suffix.isdigit():
+        if "_" in file_name:
+            suffix = file_name.split("_")[-1].replace(".npz", "")
+            if suffix != "1" and suffix.isdigit():
                 add_bos = False
 
         # 3. 数据增强: 音高移调
@@ -124,7 +127,7 @@ class PianoDataset(Dataset):
             pitch_shift = np.random.randint(-5, 6)
 
         # 4. 收集小节
-        measures = [save_dict[f'measure_{i}'] for i in range(num_measures)]
+        measures = [save_dict[f"measure_{i}"] for i in range(num_measures)]
 
         # 5. tokenize（全部委托给 tokenizer）
         input_ids, labels = self.tokenizer.build_training_sequence(
@@ -132,16 +135,17 @@ class PianoDataset(Dataset):
             metadata=metadata,
             add_bos=add_bos,
             pitch_shift=pitch_shift,
+            acc_drop_prob=self.acc_drop_prob,
         )
 
         # 6. 截断
         if len(input_ids) > self.max_seq_len:
-            input_ids = input_ids[:self.max_seq_len]
-            labels = labels[:self.max_seq_len]
+            input_ids = input_ids[: self.max_seq_len]
+            labels = labels[: self.max_seq_len]
 
         return {
-            'input_ids': input_ids,
-            'labels': labels,
+            "input_ids": input_ids,
+            "labels": labels,
         }
 
 
@@ -163,7 +167,7 @@ class BucketBatchSampler(Sampler):
         self.buckets = []
         sorted_indices = self.dataset.sorted_indices
         for i in range(0, len(sorted_indices), self.bucket_size):
-            self.buckets.append(sorted_indices[i:i + self.bucket_size])
+            self.buckets.append(sorted_indices[i : i + self.bucket_size])
         print(f"创建了 {len(self.buckets)} 个长度buckets")
 
     def __iter__(self):
@@ -177,7 +181,7 @@ class BucketBatchSampler(Sampler):
             if self.shuffle:
                 np.random.shuffle(bucket)
             for i in range(0, len(bucket), self.batch_size):
-                batch = bucket[i:i + self.batch_size]
+                batch = bucket[i : i + self.batch_size]
                 if len(batch) > 0:
                     yield batch
 
@@ -194,10 +198,7 @@ class DataCollatorForVariableLengthLM:
         self.max_length = config.train_cutoff_len
 
     def __call__(self, features: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        max_len = min(
-            max(len(f["input_ids"]) for f in features),
-            self.max_length
-        )
+        max_len = min(max(len(f["input_ids"]) for f in features), self.max_length)
 
         batch = {"input_ids": [], "labels": [], "attention_mask": []}
 
@@ -210,8 +211,7 @@ class DataCollatorForVariableLengthLM:
                 pad_len = max_len - seq_len
                 ids = torch.cat([ids, torch.full((pad_len,), self.pad_token_id, dtype=torch.long)])
                 lbl = torch.cat([lbl, torch.full((pad_len,), -100, dtype=torch.long)])
-                mask = torch.cat([torch.ones(seq_len, dtype=torch.long),
-                                  torch.zeros(pad_len, dtype=torch.long)])
+                mask = torch.cat([torch.ones(seq_len, dtype=torch.long), torch.zeros(pad_len, dtype=torch.long)])
             else:
                 mask = torch.ones(seq_len, dtype=torch.long)
 

@@ -18,10 +18,11 @@ from model import PianoLLaMA
 from Token2Midi import MidiConverter
 from PianoDataset import PianoDataset
 
-device = 'cuda:3' if torch.cuda.is_available() else 'cpu'
+device = "cuda:5" if torch.cuda.is_available() else "cpu"
 
 
 # ==================== 模型加载 ====================
+
 
 def setup_model_configs_llama(model_config: ModelConfig):
     return LlamaConfig(
@@ -41,7 +42,7 @@ def setup_model_configs_llama(model_config: ModelConfig):
     )
 
 
-def load_model(model_path, model_config, device='cuda', use_fp16=False):
+def load_model(model_path, model_config, device="cuda", use_fp16=False):
     token_config = setup_model_configs_llama(model_config)
     model = PianoLLaMA(token_config)
 
@@ -62,6 +63,7 @@ def load_model(model_path, model_config, device='cuda', use_fp16=False):
 
 # ==================== 数据准备（从 model.py 移出） ====================
 
+
 def prepare_generation(dataset, condition_idx, gt_prefix_beats=12):
     """
     从 dataset 加载一首曲子并构建生成计划。
@@ -72,8 +74,8 @@ def prepare_generation(dataset, condition_idx, gt_prefix_beats=12):
     tokenizer = dataset.tokenizer
     file_path = os.path.join(dataset.root_dir, dataset.data_files[condition_idx])
     save_dict = np.load(file_path, allow_pickle=True)
-    metadata = save_dict['metadata'].item()
-    measures = [save_dict[f'measure_{i}'] for i in range(metadata['num_measures'])]
+    metadata = save_dict["metadata"].item()
+    measures = [save_dict[f"measure_{i}"] for i in range(metadata["num_measures"])]
 
     gen_data = tokenizer.build_generation_schedule(
         measures=measures,
@@ -81,28 +83,30 @@ def prepare_generation(dataset, condition_idx, gt_prefix_beats=12):
         gt_prefix_beats=gt_prefix_beats,
     )
 
-    ts_idx = metadata['time_signature_idx']
+    ts_idx = metadata["time_signature_idx"]
     if ts_idx == 9:
         ts_idx = 4
 
     return {
-        'initial_tokens': gen_data['initial_tokens'],
-        'schedule': gen_data['schedule'],
-        'vocab': tokenizer.vocab,
-        'mel_beats': gen_data['mel_beats'],
-        'gt_path': file_path,
-        'metadata': {
-            'time_signature_idx': ts_idx,
-            'bpm': metadata['bpm'],
-            'num_measures': metadata['num_measures'],
+        "initial_tokens": gen_data["initial_tokens"],
+        "schedule": gen_data["schedule"],
+        "vocab": tokenizer.vocab,
+        "mel_beats": gen_data["mel_beats"],
+        "gt_path": file_path,
+        "metadata": {
+            "time_signature_idx": ts_idx,
+            "bpm": metadata["bpm"],
+            "num_measures": metadata["num_measures"],
         },
     }
 
 
 # ==================== 批量生成 ====================
 
-def batch_generate(model, dataset, converter, output_dir='generated_samples',
-                   num_samples=50, gt_prefix_beats=12, **gen_kwargs):
+
+def batch_generate(
+    model, dataset, converter, output_dir="generated_samples", num_samples=50, gt_prefix_beats=12, **gen_kwargs
+):
     """
     批量生成并保存 MIDI。
 
@@ -119,44 +123,43 @@ def batch_generate(model, dataset, converter, output_dir='generated_samples',
 
         # 2. 模型生成（纯推理）
         acc_beats, _ = model.generate_accompaniment(
-            initial_tokens=prep['initial_tokens'],
-            schedule=prep['schedule'],
-            vocab=prep['vocab'],
+            initial_tokens=prep["initial_tokens"],
+            schedule=prep["schedule"],
+            vocab=prep["vocab"],
             device=device,
             **gen_kwargs,
         )
 
         # 3. 保存 MIDI
-        gt_name = Path(prep['gt_path']).stem
-        tempo = prep['metadata']['bpm'] or 120
+        gt_name = Path(prep["gt_path"]).stem
+        tempo = prep["metadata"]["bpm"] or 120
 
-        converter.gt_to_midi(
-            prep['gt_path'],
-            f"{output_dir}/{timestamp}_{i}_{gt_name}_GT.mid")
+        converter.gt_to_midi(prep["gt_path"], f"{output_dir}/{timestamp}_{i}_{gt_name}_GT.mid")
 
         converter.beats_to_midi(
-            mel_beats=prep['mel_beats'],
+            mel_beats=prep["mel_beats"],
             acc_beats=acc_beats,
             tempo=tempo,
-            save_path=f"{output_dir}/{timestamp}_{i}_{gt_name}.mid")
+            save_path=f"{output_dir}/{timestamp}_{i}_{gt_name}.mid",
+        )
 
         print(f"[{i + 1}/{num_samples}] done")
 
 
 # ==================== 入口 ====================
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     model_config = ModelConfig()
 
     dataset = PianoDataset(
-        'Dataset/allxml_npz_dual_track_optimized_no_underscore',
+        "/data/home/yuanxin/data/allxml_npz_dual_track_optimized_no_underscore",
         config=model_config,
         cache_lengths=False,
     )
     print(f"Using device: {device}")
 
     model = load_model(
-        model_path="generative_newtoken_improved_1_4_relative_track_RT_Accompaniment/checkpoints/epoch_4_1104_1204/model.safetensors",
+        model_path="checkpoints-resume/epoch_15_0307_1858/model.safetensors",
         model_config=model_config,
         device=device,
     )
@@ -164,8 +167,10 @@ if __name__ == '__main__':
     converter = MidiConverter(dataset.tokenizer)
 
     batch_generate(
-        model, dataset, converter,
-        output_dir='generated_samples_1030',
+        model,
+        dataset,
+        converter,
+        output_dir="generated_samples_1030",
         num_samples=200,
         gt_prefix_beats=12,
         temperature=1.1,

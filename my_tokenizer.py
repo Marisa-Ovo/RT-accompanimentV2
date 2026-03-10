@@ -20,17 +20,19 @@ from dataclasses import dataclass
 #  Vocabulary — 所有 token ID 的唯一定义处
 # ============================================================================
 
+
 @dataclass(frozen=True)
 class Vocabulary:
     """
     集中管理所有 token ID，消除 magic number。
     frozen=True 防止运行时意外修改。
     """
+
     # --- Patch codec 标记 ---
     empty_marker: int = 169
-    track_marker_acc: int = 170       # acc 轨结束标记
-    track_marker_mel: int = 171       # mel 轨结束标记
-    beat_marker: int = 172            # 拍分隔符
+    track_marker_acc: int = 170  # acc 轨结束标记
+    track_marker_mel: int = 171  # mel 轨结束标记
+    beat_marker: int = 172  # 拍分隔符
 
     # --- Codec 参数 ---
     marker_offset: int = 81
@@ -43,7 +45,7 @@ class Vocabulary:
     bos_token_id: int = 257
     pad_token_id: int = 258
     time_sig_offset_id: int = 259
-    bpm_offset_id: int = 264          # = 259 + 5
+    bpm_offset_id: int = 264  # = 259 + 5
 
     # --- BPM 分桶阈值 ---
     bpm_slow_threshold: int = 90
@@ -54,7 +56,7 @@ class Vocabulary:
     default_patch_w: int = 4
 
     @classmethod
-    def from_config(cls, config) -> 'Vocabulary':
+    def from_config(cls, config) -> "Vocabulary":
         """从 ModelConfig 创建 Vocabulary，用 config 值覆盖默认值。"""
         return cls(
             track_marker_acc=config.track_marker_acc_id,
@@ -76,13 +78,15 @@ class Vocabulary:
 @dataclass
 class GenerationStep:
     """生成计划中的单个步骤。"""
-    action: str   # "inject" = 注入已知tokens, "inject_gt" = 注入GT, "generate" = 自回归生成
+
+    action: str  # "inject" = 注入已知tokens, "inject_gt" = 注入GT, "generate" = 自回归生成
     data: Optional[torch.Tensor] = None
 
 
 # ============================================================================
 #  PatchCodec — Layer 1: piano roll <-> patch token matrix
 # ============================================================================
+
 
 class PatchCodec:
     """
@@ -105,9 +109,31 @@ class PatchCodec:
 
         # strict 模式的特殊 token 替换规则
         self.special_token_ids = [
-            13, 12, 59, 31, 64, 11, 55, 73, 37, 30,
-            28, 5, 15, 46, 16, 17, 10, 14, 32, 19,
-            3, 9, 1, 57, 4
+            13,
+            12,
+            59,
+            31,
+            64,
+            11,
+            55,
+            73,
+            37,
+            30,
+            28,
+            5,
+            15,
+            46,
+            16,
+            17,
+            10,
+            14,
+            32,
+            19,
+            3,
+            9,
+            1,
+            57,
+            4,
         ]
         self.replacement_ids = [0, 67, 7, 40, 63]
 
@@ -202,6 +228,7 @@ class PatchCodec:
 # ============================================================================
 #  PianoMusicTokenizer — 完整的音乐 tokenizer
 # ============================================================================
+
 
 class PianoMusicTokenizer:
     """
@@ -352,10 +379,12 @@ class PianoMusicTokenizer:
             tokens_acc = self._codec.image_to_patch_tokens(beat[2:], strict_mode=True)
             comp_acc = self.compress_tokens(tokens_acc, track_marker=v.track_marker_acc)
 
-            beats.append((
-                torch.tensor(comp_acc, dtype=torch.long),
-                torch.tensor(comp_mel, dtype=torch.long),
-            ))
+            beats.append(
+                (
+                    torch.tensor(comp_acc, dtype=torch.long),
+                    torch.tensor(comp_mel, dtype=torch.long),
+                )
+            )
 
         return beats
 
@@ -397,9 +426,9 @@ class PianoMusicTokenizer:
             measure_beats: List[List[(acc_tensor, mel_tensor)]]
                 第一层按小节分组，第二层按拍分组
         """
-        ts_token = self.encode_time_sig(metadata['time_signature_idx'])
-        bpm_token = self.encode_bpm(metadata['bpm'])
-        is_continuation = metadata.get('is_continuation', False)
+        ts_token = self.encode_time_sig(metadata["time_signature_idx"])
+        bpm_token = self.encode_bpm(metadata["bpm"])
+        is_continuation = metadata.get("is_continuation", False)
 
         measure_beats = []
         for measure in measures:
@@ -424,6 +453,7 @@ class PianoMusicTokenizer:
         add_bos: bool = True,
         timesteps_per_beat: int = 4,
         pitch_shift: int = 0,
+        acc_drop_prob: float = 0.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         构建完整的训练序列 (input_ids, labels)。
@@ -433,13 +463,18 @@ class PianoMusicTokenizer:
 
         Labels: bar/beat_marker/mel 部分用 pad_token_id 填充（不参与 loss），
                 acc 部分作为预测目标。
+                当 acc_drop_prob > 0 时，随机将某些 beat 的 acc 替换为空，
+                这些 beat 的 acc 也不参与 loss（强迫模型减少对 acc history 的依赖）。
 
         Returns:
             (input_ids, labels): 均为 1D torch.long tensor。
         """
         v = self.vocab
         ts_token, bpm_token, is_continuation, measure_beats = self._encode_measures(
-            measures, metadata, timesteps_per_beat, pitch_shift)
+            measures, metadata, timesteps_per_beat, pitch_shift
+        )
+
+        empty_acc = torch.tensor([v.empty_marker, v.track_marker_acc], dtype=torch.long)
 
         inp_parts = []
         lbl_parts = []
@@ -456,9 +491,14 @@ class PianoMusicTokenizer:
                 inp_parts.append(bm)
                 lbl_parts.append(torch.full_like(bm, v.pad_token_id))
 
-                # [acc tokens] — 预测目标
-                inp_parts.append(acc)
-                lbl_parts.append(acc)
+                # Drop acc: 以 acc_drop_prob 概率将 input 中的 acc 替换为空，且不参与 loss
+                if acc_drop_prob > 0.0 and np.random.random() < acc_drop_prob:
+                    inp_parts.append(empty_acc)
+                    lbl_parts.append(torch.full_like(empty_acc, v.pad_token_id))
+                else:
+                    # [acc tokens] — 预测目标
+                    inp_parts.append(acc)
+                    lbl_parts.append(acc)
 
                 # [mel tokens] — 条件输入，不参与 loss
                 inp_parts.append(mel)
@@ -479,10 +519,12 @@ class PianoMusicTokenizer:
         ts_t = torch.tensor([ts_token], dtype=torch.long)
         bp_t = torch.tensor([bpm_token], dtype=torch.long)
         seq_inp.extend([ts_t, bp_t])
-        seq_lbl.extend([
-            torch.full_like(ts_t, v.pad_token_id),
-            torch.full_like(bp_t, v.pad_token_id),
-        ])
+        seq_lbl.extend(
+            [
+                torch.full_like(ts_t, v.pad_token_id),
+                torch.full_like(bp_t, v.pad_token_id),
+            ]
+        )
 
         seq_inp.append(measure_inp)
         seq_lbl.append(measure_lbl)
@@ -515,11 +557,9 @@ class PianoMusicTokenizer:
                 'acc_beats_gt': List[torch.Tensor] — 所有 acc 拍 GT（用于参考）
         """
         v = self.vocab
-        ts_token, bpm_token, _, measure_beats = self._encode_measures(
-            measures, metadata, timesteps_per_beat)
+        ts_token, bpm_token, _, measure_beats = self._encode_measures(measures, metadata, timesteps_per_beat)
 
-        initial = torch.tensor(
-            [v.bos_token_id, ts_token, bpm_token], dtype=torch.long)
+        initial = torch.tensor([v.bos_token_id, ts_token, bpm_token], dtype=torch.long)
 
         steps = []
         mel_beats_all = []
@@ -548,10 +588,10 @@ class PianoMusicTokenizer:
                 beat_idx += 1
 
         return {
-            'initial_tokens': initial,
-            'schedule': steps,
-            'mel_beats': mel_beats_all,
-            'acc_beats_gt': acc_beats_gt_all,
+            "initial_tokens": initial,
+            "schedule": steps,
+            "mel_beats": mel_beats_all,
+            "acc_beats_gt": acc_beats_gt_all,
         }
 
     # ===================== 解码 =====================
@@ -622,15 +662,15 @@ class PianoMusicTokenizer:
         """返回配置字典。"""
         v = self.vocab
         return {
-            'patch_h': v.default_patch_h,
-            'patch_w': v.default_patch_w,
-            'marker_offset': v.marker_offset,
-            'measures_length': v.measures_length,
-            'track_marker_acc': v.track_marker_acc,
-            'track_marker_mel': v.track_marker_mel,
-            'beat_marker': v.beat_marker,
-            'empty_marker': v.empty_marker,
-            'img_h': v.img_h,
+            "patch_h": v.default_patch_h,
+            "patch_w": v.default_patch_w,
+            "marker_offset": v.marker_offset,
+            "measures_length": v.measures_length,
+            "track_marker_acc": v.track_marker_acc,
+            "track_marker_mel": v.track_marker_mel,
+            "beat_marker": v.beat_marker,
+            "empty_marker": v.empty_marker,
+            "img_h": v.img_h,
         }
 
     def __repr__(self) -> str:

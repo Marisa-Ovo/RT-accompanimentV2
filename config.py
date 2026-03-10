@@ -9,8 +9,8 @@ class TrainingConfig:
 
     # 基础配置
     time = datetime.now().strftime("%m%d_%H%M")
-    output_dir: str = "./checkpoints-resume"
-    num_epochs: int = 16
+    output_dir: str = "./checkpoints-drop-0.2"
+    num_epochs: int = 4
     save_model_epochs: int = 1
     train_batch_size = 16
     gradient_accumulation_steps: int = 32  # effective batch = 16×32=512
@@ -24,7 +24,7 @@ class TrainingConfig:
     log: bool = True
     log_every_n_steps: int = 20
     tensorboard_log_dir: str = "./logs"
-    tensorboard_log_name: str = f"music_transformer_{time}"
+    tensorboard_log_name: str = f"music_transformer_drop02_{time}"
     # standard (192K files): allxml_npz_dual_track_optimized_no_underscore
     # augmented (342K files): allxml_npz_dual_track_optimized
     data_dir = "/data/home/yuanxin/data/allxml_npz_dual_track_optimized_no_underscore"
@@ -36,6 +36,11 @@ class TrainingConfig:
     test_frequency: float = 0.10  # 测试频率（每0.10个epoch测试一次）
     test_batch_size: int = 4  # 测试时的batch size
     test_save_results: bool = True  # 是否保存测试结果到tensorboard
+
+    # Drop Accompaniment 训练增强
+    # 训练时以此概率将某 beat 的 acc 替换为空，强迫模型减少对 acc history 的依赖
+    # 0.0 = 关闭（默认），推荐值 0.1~0.2
+    acc_drop_prob: float = 0.2
     random_seed: int = 42  # 数据集划分的随机种子
 
 
