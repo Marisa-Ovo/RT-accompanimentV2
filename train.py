@@ -21,6 +21,7 @@ from model import PianoLLaMA
 # 设置可见的GPU设备
 # os.environ["CUDA_VISIBLE_DEVICES"] = "5"
 
+
 def create_model_config(model_config: ModelConfig) -> LlamaConfig:
     """根据模型配置创建LLaMA配置
 
@@ -194,7 +195,7 @@ def main():
     )
 
     print("初始化模型")
-    checkpoint_path = "checkpoints/epoch_5_0306_1830/model.safetensors"
+    checkpoint_path = "checkpoints-resume/epoch_15_0307_1858/model.safetensors"
     model = initialize_model(llama_config, checkpoint_path)
 
     # 初始化训练器
