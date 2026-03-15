@@ -24,6 +24,7 @@ class PianoDataset(Dataset):
         test_split_ratio=0.05,
         random_seed=42,
         acc_drop_prob=0.0,
+        pos_shift_max=0,
     ):
         """
         Args:
@@ -40,6 +41,7 @@ class PianoDataset(Dataset):
         self.test_split_ratio = test_split_ratio
         self.random_seed = random_seed
         self.acc_drop_prob = acc_drop_prob
+        self.pos_shift_max = pos_shift_max
 
         # 唯一的 tokenizer 入口
         self.tokenizer = PianoMusicTokenizer(config=config)
@@ -136,6 +138,7 @@ class PianoDataset(Dataset):
             add_bos=add_bos,
             pitch_shift=pitch_shift,
             acc_drop_prob=self.acc_drop_prob,
+            pos_shift_max=self.pos_shift_max,
         )
 
         # 6. 截断

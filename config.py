@@ -9,7 +9,7 @@ class TrainingConfig:
 
     # 基础配置
     time = datetime.now().strftime("%m%d_%H%M")
-    output_dir: str = "./checkpoints-drop-0.2"
+    output_dir: str = "./checkpoints-shift-3"
     num_epochs: int = 4
     save_model_epochs: int = 1
     train_batch_size = 16
@@ -24,7 +24,7 @@ class TrainingConfig:
     log: bool = True
     log_every_n_steps: int = 20
     tensorboard_log_dir: str = "./logs"
-    tensorboard_log_name: str = f"music_transformer_drop02_{time}"
+    tensorboard_log_name: str = f"music_transformer_shift3_{time}"
     # standard (192K files): allxml_npz_dual_track_optimized_no_underscore
     # augmented (342K files): allxml_npz_dual_track_optimized
     data_dir = "/data/home/yuanxin/data/allxml_npz_dual_track_optimized_no_underscore"
@@ -40,7 +40,13 @@ class TrainingConfig:
     # Drop Accompaniment 训练增强
     # 训练时以此概率将某 beat 的 acc 替换为空，强迫模型减少对 acc history 的依赖
     # 0.0 = 关闭（默认），推荐值 0.1~0.2
-    acc_drop_prob: float = 0.2
+    acc_drop_prob: float = 0
+
+    # Position Shift 训练增强
+    # 每首曲子随机采样 Δ ∈ {0,...,pos_shift_max}，整体偏移 beat 内的位置标记
+    # 使 BEAT token 不再是严格的"位置0"锚点，增强泛化
+    # 0 = 关闭（默认），推荐值 3
+    pos_shift_max: int = 3
     random_seed: int = 42  # 数据集划分的随机种子
 
 

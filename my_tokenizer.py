@@ -265,6 +265,7 @@ class PianoMusicTokenizer:
         self,
         token_matrix: np.ndarray,
         track_marker: int,
+        pos_shift: int = 0,
     ) -> np.ndarray:
         """
         使用相对位置编码压缩 token 矩阵。
@@ -272,6 +273,9 @@ class PianoMusicTokenizer:
         Args:
             token_matrix: (num_measures, measures_length) 的 token 矩阵
             track_marker: 轨道结束标记 (track_marker_acc 或 track_marker_mel)
+            pos_shift: 位置偏移量。将每拍的起始 prev 设为 -pos_shift，
+                       使第一个位置标记变为 idx + pos_shift，
+                       从而让 BEAT 不再是严格的"位置0"锚点。
 
         Returns:
             compressed: 压缩后的一维序列
@@ -285,7 +289,7 @@ class PianoMusicTokenizer:
                 compressed_seqs.append(np.array([v.empty_marker, track_marker], dtype=np.int64))
             else:
                 parts = []
-                prev = 0
+                prev = -pos_shift  # 位置偏移：第一个相对距离 = idx - (-shift) = idx + shift
                 for idx in nz:
                     parts.extend([v.marker_offset + (idx - prev), row[idx]])
                     prev = idx
@@ -344,6 +348,7 @@ class PianoMusicTokenizer:
         self,
         measure: np.ndarray,
         timesteps_per_beat: int = 4,
+        pos_shift: int = 0,
     ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """
         将 4 通道 measure 编码为逐拍 (acc, mel) 压缩 token 对。
@@ -351,6 +356,7 @@ class PianoMusicTokenizer:
         Args:
             measure: (4, 88, t) — ch0:2 = mel(part0), ch2:4 = acc(part1)
             timesteps_per_beat: 每拍的时间步数
+            pos_shift: 位置偏移量，传递给 compress_tokens
 
         Returns:
             beats: List[(acc_tensor, mel_tensor)] — 每元素对应一拍
@@ -373,11 +379,11 @@ class PianoMusicTokenizer:
 
             # mel: channels 0-1
             tokens_mel = self._codec.image_to_patch_tokens(beat[:2], strict_mode=True)
-            comp_mel = self.compress_tokens(tokens_mel, track_marker=v.track_marker_mel)
+            comp_mel = self.compress_tokens(tokens_mel, track_marker=v.track_marker_mel, pos_shift=pos_shift)
 
             # acc: channels 2-3
             tokens_acc = self._codec.image_to_patch_tokens(beat[2:], strict_mode=True)
-            comp_acc = self.compress_tokens(tokens_acc, track_marker=v.track_marker_acc)
+            comp_acc = self.compress_tokens(tokens_acc, track_marker=v.track_marker_acc, pos_shift=pos_shift)
 
             beats.append(
                 (
@@ -417,6 +423,7 @@ class PianoMusicTokenizer:
         metadata: dict,
         timesteps_per_beat: int = 4,
         pitch_shift: int = 0,
+        pos_shift: int = 0,
     ) -> Tuple[int, int, bool, List[List[Tuple[torch.Tensor, torch.Tensor]]]]:
         """
         编码所有小节，返回按小节分组的 (acc, mel) 拍对。
@@ -439,7 +446,7 @@ class PianoMusicTokenizer:
                 else:
                     measure[:, pitch_shift:, :] = 0
 
-            beats = self.encode_measure(measure, timesteps_per_beat)
+            beats = self.encode_measure(measure, timesteps_per_beat, pos_shift=pos_shift)
             measure_beats.append(beats)
 
         return ts_token, bpm_token, is_continuation, measure_beats
@@ -454,6 +461,7 @@ class PianoMusicTokenizer:
         timesteps_per_beat: int = 4,
         pitch_shift: int = 0,
         acc_drop_prob: float = 0.0,
+        pos_shift_max: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         构建完整的训练序列 (input_ids, labels)。
@@ -465,13 +473,20 @@ class PianoMusicTokenizer:
                 acc 部分作为预测目标。
                 当 acc_drop_prob > 0 时，随机将某些 beat 的 acc 替换为空，
                 这些 beat 的 acc 也不参与 loss（强迫模型减少对 acc history 的依赖）。
+                当 pos_shift_max > 0 时，对每首曲子随机采样 Δ ∈ {0,...,pos_shift_max}，
+                将该曲所有 beat 的 acc 和 mel 位置标记整体偏移 Δ，
+                使 BEAT token 不再是严格的"位置0"锚点。
 
         Returns:
             (input_ids, labels): 均为 1D torch.long tensor。
         """
         v = self.vocab
+
+        # 位置偏移增强：每首曲子固定一个 Δ（固定 per-song）
+        pos_shift = int(np.random.randint(0, pos_shift_max + 1)) if pos_shift_max > 0 else 0
+
         ts_token, bpm_token, is_continuation, measure_beats = self._encode_measures(
-            measures, metadata, timesteps_per_beat, pitch_shift
+            measures, metadata, timesteps_per_beat, pitch_shift, pos_shift=pos_shift
         )
 
         empty_acc = torch.tensor([v.empty_marker, v.track_marker_acc], dtype=torch.long)

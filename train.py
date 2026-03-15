@@ -67,6 +67,7 @@ def create_datasets(train_config: TrainingConfig, model_config: ModelConfig, use
         test_split_ratio=train_config.test_split_ratio,
         random_seed=train_config.random_seed,
         acc_drop_prob=train_config.acc_drop_prob,
+        pos_shift_max=train_config.pos_shift_max,
     )
 
     # 创建测试数据集（如果启用）

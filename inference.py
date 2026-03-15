@@ -158,8 +158,13 @@ if __name__ == "__main__":
     )
     print(f"Using device: {device}")
 
+    # model = load_model(
+    #     model_path="checkpoints-resume/epoch_15_0307_1858/model.safetensors",
+    #     model_config=model_config,
+    #     device=device,
+    # )
     model = load_model(
-        model_path="checkpoints-resume/epoch_15_0307_1858/model.safetensors",
+        model_path="checkpoints-drop-0.2/epoch_3_0311_1354/model.safetensors",
         model_config=model_config,
         device=device,
     )
@@ -170,9 +175,11 @@ if __name__ == "__main__":
         model,
         dataset,
         converter,
-        output_dir="generated_samples_1030",
+        # output_dir="generated_samples_1030-shift3",
+        output_dir="generated_samples_0314-drop-02-no-prefix",
         num_samples=200,
-        gt_prefix_beats=12,
+        # gt_prefix_beats=12,
+        gt_prefix_beats=0,
         temperature=1.1,
         top_k=10,
         top_p=0.95,
