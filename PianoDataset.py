@@ -25,6 +25,8 @@ class PianoDataset(Dataset):
         random_seed=42,
         acc_drop_prob=0.0,
         pos_shift_max=0,
+        drop_initial_beats=0,
+        drop_initial_beats_prob=1.0,
     ):
         """
         Args:
@@ -42,6 +44,8 @@ class PianoDataset(Dataset):
         self.random_seed = random_seed
         self.acc_drop_prob = acc_drop_prob
         self.pos_shift_max = pos_shift_max
+        self.drop_initial_beats = drop_initial_beats
+        self.drop_initial_beats_prob = drop_initial_beats_prob
 
         # 唯一的 tokenizer 入口
         self.tokenizer = PianoMusicTokenizer(config=config)
@@ -139,6 +143,8 @@ class PianoDataset(Dataset):
             pitch_shift=pitch_shift,
             acc_drop_prob=self.acc_drop_prob,
             pos_shift_max=self.pos_shift_max,
+            drop_initial_beats=self.drop_initial_beats,
+            drop_initial_beats_prob=self.drop_initial_beats_prob,
         )
 
         # 6. 截断

@@ -1,6 +1,12 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
+
+
+def _format_exp_value(value: float) -> str:
+    """将数值压缩成适合实验名的短字符串。"""
+    text = f"{value:g}"
+    return text.replace(".", "p")
 
 
 @dataclass
@@ -8,8 +14,10 @@ class TrainingConfig:
     """训练配置类"""
 
     # 基础配置
-    time = datetime.now().strftime("%m%d_%H%M")
-    output_dir: str = "./checkpoints-shift-3"
+    time: str = field(default_factory=lambda: datetime.now().strftime("%m%d_%H%M"))
+    experiment_name: str = ""  # 留空时根据关键增强参数自动生成
+    output_root: str = "./checkpoints"
+    output_dir: str = ""  # 留空时自动绑定到 experiment_name
     num_epochs: int = 4
     save_model_epochs: int = 1
     train_batch_size = 16
@@ -24,7 +32,7 @@ class TrainingConfig:
     log: bool = True
     log_every_n_steps: int = 20
     tensorboard_log_dir: str = "./logs"
-    tensorboard_log_name: str = f"music_transformer_shift3_{time}"
+    tensorboard_log_name: str = ""  # 留空时自动绑定到 experiment_name
     # standard (192K files): allxml_npz_dual_track_optimized_no_underscore
     # augmented (342K files): allxml_npz_dual_track_optimized
     data_dir = "/data/home/yuanxin/data/allxml_npz_dual_track_optimized_no_underscore"
@@ -38,16 +46,52 @@ class TrainingConfig:
     test_save_results: bool = True  # 是否保存测试结果到tensorboard
 
     # Drop Accompaniment 训练增强
-    # 训练时以此概率将某 beat 的 acc 替换为空，强迫模型减少对 acc history 的依赖
+    # acc_drop_prob: 以此概率随机 drop 任意 beat 的 acc（per-beat）
     # 0.0 = 关闭（默认），推荐值 0.1~0.2
     acc_drop_prob: float = 0
+
+    # Drop Initial Beats 训练增强
+    # drop_initial_beats: drop 每首曲子前 N 个 beat 的 acc（强制"冷启动"）
+    # 0 = 关闭（默认），推荐值 2
+    drop_initial_beats: int = 2
+    # drop_initial_beats_prob: 应用概率
+    # 1.0 = 总是 drop 前 N beat，0.5 = 50% 概率 drop 前 N beat
+    drop_initial_beats_prob: float = 0.3
 
     # Position Shift 训练增强
     # 每首曲子随机采样 Δ ∈ {0,...,pos_shift_max}，整体偏移 beat 内的位置标记
     # 使 BEAT token 不再是严格的"位置0"锚点，增强泛化
     # 0 = 关闭（默认），推荐值 3
-    pos_shift_max: int = 3
+    pos_shift_max: int = 0
     random_seed: int = 42  # 数据集划分的随机种子
+
+    def __post_init__(self):
+        if not self.experiment_name:
+            self.experiment_name = self._build_experiment_name()
+
+        run_name = f"{self.experiment_name}_{self.time}"
+        if not self.tensorboard_log_name:
+            self.tensorboard_log_name = run_name
+        if not self.output_dir:
+            self.output_dir = f"{self.output_root}/{run_name}"
+
+    def _build_experiment_name(self) -> str:
+        """根据最关键的训练增强参数生成稳定、易读的实验名。"""
+        parts = ["music_transformer"]
+
+        if self.pos_shift_max > 0:
+            parts.append(f"shift{self.pos_shift_max}")
+
+        if self.acc_drop_prob > 0:
+            parts.append(f"accdrop{_format_exp_value(self.acc_drop_prob)}")
+
+        if self.drop_initial_beats > 0 and self.drop_initial_beats_prob > 0:
+            part = f"initdrop{self.drop_initial_beats}"
+            if self.drop_initial_beats_prob < 1.0:
+                part += f"p{_format_exp_value(self.drop_initial_beats_prob)}"
+            parts.append(part)
+
+        return "_".join(parts)
 
 
 @dataclass

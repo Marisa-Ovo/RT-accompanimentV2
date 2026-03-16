@@ -462,6 +462,8 @@ class PianoMusicTokenizer:
         pitch_shift: int = 0,
         acc_drop_prob: float = 0.0,
         pos_shift_max: int = 0,
+        drop_initial_beats: int = 0,
+        drop_initial_beats_prob: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         构建完整的训练序列 (input_ids, labels)。
@@ -473,6 +475,8 @@ class PianoMusicTokenizer:
                 acc 部分作为预测目标。
                 当 acc_drop_prob > 0 时，随机将某些 beat 的 acc 替换为空，
                 这些 beat 的 acc 也不参与 loss（强迫模型减少对 acc history 的依赖）。
+                当 drop_initial_beats > 0 时，drop 每首曲子前 N 个 beat 的 acc（冷启动），
+                由 drop_initial_beats_prob 控制是否应用（1.0=总是，0.5=50%概率）。
                 当 pos_shift_max > 0 时，对每首曲子随机采样 Δ ∈ {0,...,pos_shift_max}，
                 将该曲所有 beat 的 acc 和 mel 位置标记整体偏移 Δ，
                 使 BEAT token 不再是严格的"位置0"锚点。
@@ -489,10 +493,16 @@ class PianoMusicTokenizer:
             measures, metadata, timesteps_per_beat, pitch_shift, pos_shift=pos_shift
         )
 
+        # Drop initial beats: 决定是否 drop 前 N 个 beat（per-song）
+        should_drop_initial = False
+        if drop_initial_beats > 0 and drop_initial_beats_prob > 0.0:
+            should_drop_initial = np.random.random() < drop_initial_beats_prob
+
         empty_acc = torch.tensor([v.empty_marker, v.track_marker_acc], dtype=torch.long)
 
         inp_parts = []
         lbl_parts = []
+        global_beat_idx = 0
 
         for beats in measure_beats:
             # [bar]
@@ -506,8 +516,14 @@ class PianoMusicTokenizer:
                 inp_parts.append(bm)
                 lbl_parts.append(torch.full_like(bm, v.pad_token_id))
 
-                # Drop acc: 以 acc_drop_prob 概率将 input 中的 acc 替换为空，且不参与 loss
-                if acc_drop_prob > 0.0 and np.random.random() < acc_drop_prob:
+                # 判断是否 drop 当前 beat 的 acc
+                drop_this_beat = False
+                if should_drop_initial and global_beat_idx < drop_initial_beats:
+                    drop_this_beat = True
+                elif acc_drop_prob > 0.0 and np.random.random() < acc_drop_prob:
+                    drop_this_beat = True
+
+                if drop_this_beat:
                     inp_parts.append(empty_acc)
                     lbl_parts.append(torch.full_like(empty_acc, v.pad_token_id))
                 else:
@@ -518,6 +534,8 @@ class PianoMusicTokenizer:
                 # [mel tokens] — 条件输入，不参与 loss
                 inp_parts.append(mel)
                 lbl_parts.append(torch.full_like(mel, v.pad_token_id))
+
+                global_beat_idx += 1
 
         measure_inp = torch.cat(inp_parts)
         measure_lbl = torch.cat(lbl_parts)

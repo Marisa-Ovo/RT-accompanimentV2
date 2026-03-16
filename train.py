@@ -9,6 +9,9 @@
 """
 
 import os
+
+# 设置可见的GPU设备
+os.environ["CUDA_VISIBLE_DEVICES"] = "5"
 import safetensors.torch
 from torch.utils.data import DataLoader
 from transformers import LlamaConfig
@@ -17,9 +20,6 @@ from config import TrainingConfig, ModelConfig
 from PianoDataset import BucketBatchSampler, DataCollatorForVariableLengthLM, PianoDataset
 from trainer import TransformerTrainer
 from model import PianoLLaMA
-
-# 设置可见的GPU设备
-# os.environ["CUDA_VISIBLE_DEVICES"] = "5"
 
 
 def create_model_config(model_config: ModelConfig) -> LlamaConfig:
@@ -68,6 +68,8 @@ def create_datasets(train_config: TrainingConfig, model_config: ModelConfig, use
         random_seed=train_config.random_seed,
         acc_drop_prob=train_config.acc_drop_prob,
         pos_shift_max=train_config.pos_shift_max,
+        drop_initial_beats=train_config.drop_initial_beats,
+        drop_initial_beats_prob=train_config.drop_initial_beats_prob,
     )
 
     # 创建测试数据集（如果启用）
